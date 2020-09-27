@@ -2,7 +2,7 @@
 
 | ML.NET version | API type          | Status                        | App Type    | Data type | Scenario            | ML Task                   | Algorithms                  |
 |----------------|-------------------|-------------------------------|-------------|-----------|---------------------|---------------------------|-----------------------------|
-| v0.7           | Dynamic API | README.md needs update | Console app | .csv files | Price prediction | Regression | Sdca Regression |
+| v1.4           | Dynamic API | Up-to-date | Console app | .csv files | Price prediction | Regression | Sdca Regression |
 
 In this introductory sample, you'll see how to use [ML.NET](https://www.microsoft.com/net/learn/apps/machine-learning-and-ai/ml-dotnet) to predict taxi fares. In the world of machine learning, this type of prediction is known as **regression**.
 
@@ -32,113 +32,95 @@ To solve this problem, first we will build an ML model. Then we will train the m
 
 ![Build -> Train -> Evaluate -> Consume](../shared_content/modelpipeline.png)
 
-### 1. Build model
+### 1. Build model's pipeline
 
-Building a model includes: uploading data (`taxi-fare-train.csv` with `TextLoader`), transforming the data so it can be used effectively by an ML algorithm (`FastTreeRegressor` in this case):
+Building a model includes: uploading data (`taxi-fare-train.csv` with `TextLoader`), transforming the data so it can be used effectively by an ML algorithm (`StochasticDualCoordinateAscent` in this case):
 
 ```CSharp
-//Create ML Context
-LocalEnvironment mlcontext = new LocalEnvironment();
+//Create ML Context with seed for repeteable/deterministic results
+MLContext mlContext = new MLContext(seed: 0);
 
-// Create the TextLoader by defining the data columns and where to find (column position) them in the text file.
-TextLoader textLoader = new TextLoader(mlcontext,
-                                new TextLoader.Arguments()
-                                {
-                                    Separator = ",",
-                                    HasHeader = true,
-                                    Column = new[]
-                                    {
-                                        new TextLoader.Column("VendorId", DataKind.Text, 0),
-                                        new TextLoader.Column("RateCode", DataKind.Text, 1),
-                                        new TextLoader.Column("PassengerCount", DataKind.R4, 2),
-                                        new TextLoader.Column("TripTime", DataKind.R4, 3),
-                                        new TextLoader.Column("TripDistance", DataKind.R4, 4),
-                                        new TextLoader.Column("PaymentType", DataKind.Text, 5),
-                                        new TextLoader.Column("FareAmount", DataKind.R4, 6)
-                                    }
-                                });
+// STEP 1: Common data loading configuration
+IDataView baseTrainingDataView = mlContext.Data.LoadFromTextFile<TaxiTrip>(TrainDataPath, hasHeader: true, separatorChar: ',');
+IDataView testDataView = mlContext.Data.LoadFromTextFile<TaxiTrip>(TestDataPath, hasHeader: true, separatorChar: ',');
 
-// Now read the file (remember though, readers are lazy, so the actual reading will happen when 'fitting').
-IDataView dataView = textLoader.Read(new MultiFileSource(TrainDataPath));
+//Sample code of removing extreme data like "outliers" for FareAmounts higher than $150 and lower than $1 which can be error-data 
+var cnt = baseTrainingDataView.GetColumn<float>(nameof(TaxiTrip.FareAmount)).Count();
+IDataView trainingDataView = mlContext.Data.FilterRowsByColumn(baseTrainingDataView, nameof(TaxiTrip.FareAmount), lowerBound: 1, upperBound: 150);
+var cnt2 = trainingDataView.GetColumn<float>(nameof(TaxiTrip.FareAmount)).Count();
 
-//Copy the Count column to the Label column 
+// STEP 2: Common data process configuration with pipeline data transformations
+var dataProcessPipeline = mlContext.Transforms.CopyColumns(outputColumnName: "Label", inputColumnName: nameof(TaxiTrip.FareAmount))
+                            .Append(mlContext.Transforms.Categorical.OneHotEncoding(outputColumnName: "VendorIdEncoded", inputColumnName: nameof(TaxiTrip.VendorId)))
+                            .Append(mlContext.Transforms.Categorical.OneHotEncoding(outputColumnName: "RateCodeEncoded", inputColumnName: nameof(TaxiTrip.RateCode)))
+                            .Append(mlContext.Transforms.Categorical.OneHotEncoding(outputColumnName: "PaymentTypeEncoded",inputColumnName: nameof(TaxiTrip.PaymentType)))
+                            .Append(mlContext.Transforms.NormalizeMeanVariance(outputColumnName: nameof(TaxiTrip.PassengerCount)))
+                            .Append(mlContext.Transforms.NormalizeMeanVariance(outputColumnName: nameof(TaxiTrip.TripTime)))
+                            .Append(mlContext.Transforms.NormalizeMeanVariance(outputColumnName: nameof(TaxiTrip.TripDistance)))
+                            .Append(mlContext.Transforms.Concatenate("Features", "VendorIdEncoded", "RateCodeEncoded", "PaymentTypeEncoded", nameof(TaxiTrip.PassengerCount)
+                            , nameof(TaxiTrip.TripTime), nameof(TaxiTrip.TripDistance)));
 
-// In our case, we will one-hot encode as categorical values the VendorId, RateCode and PaymentType
-// Then concatenate that with the numeric columns.
-var pipeline = new CopyColumnsEstimator(mlcontext, "FareAmount", "Label")
-                        .Append(new CategoricalEstimator(mlcontext, "VendorId"))
-                        .Append(new CategoricalEstimator(mlcontext, "RateCode"))
-                        .Append(new CategoricalEstimator(mlcontext, "PaymentType"))
-                        .Append(new ConcatEstimator(mlcontext, "Features", "VendorId", "RateCode", "PassengerCount", "TripTime", "TripDistance", "PaymentType"));
 
-// We apply our selected trainer (SDCA algorithm)
-var pipelineWithTrainer = pipeline.Append(new SdcaRegressionTrainer(mlcontext, new SdcaRegressionTrainer.Arguments(),
-                                                                    "Features", "Label"));
-
+// STEP 3: Set the training algorithm, then create and config the modelBuilder - Selected Trainer (SDCA Regression algorithm)                            
+var trainer = mlContext.Regression.Trainers.Sdca(labelColumnName: "Label", featureColumnName: "Features");
+var trainingPipeline = dataProcessPipeline.Append(trainer);
 ```
 
 ### 2. Train model
 Training the model is a process of running the chosen algorithm on a training data (with known fare values) to tune the parameters of the model. It is implemented in the `Fit()` API. To perform training we just call the method while providing the DataView.
 ```CSharp
-var model = pipelineWithTrainer.Fit(dataView);
+var trainedModel = trainingPipeline.Fit(trainingDataView);
 ```
 ### 3. Evaluate model
-We need this step to conclude how accurate our model operates on new data. To do so, the model from the previous step is run against another dataset that was not used in training (`taxi-fare-test.csv`). This dataset also contains known fares. `RegressionEvaluator` calculates the difference between known fares and values predicted by the model in various metrics.
+We need this step to conclude how accurate our model operates on new data. To do so, the model from the previous step is run against another dataset that was not used in training (`taxi-fare-test.csv`). This dataset also contains known fares. `Regression.Evaluate()` calculates the difference between known fares and values predicted by the model in various metrics.
 
 ```CSharp
-            IDataView testDataView = textLoader.Read(new MultiFileSource(testDataLocation));
+IDataView predictions = trainedModel.Transform(testDataView);
+var metrics = mlContext.Regression.Evaluate(predictions, labelColumnName: "Label", scoreColumnName: "Score");
 
-            Console.WriteLine("=============== Evaluating Model's accuracy with Test data===============");
-            var predictions = model.Transform(testDataView);
-
-            var regressionCtx = new RegressionContext(mlcontext);
-            var metrics = regressionCtx.Evaluate(predictions, "Label", "Score");
-            var algorithmName = "SdcaRegressionTrainer";
-            Console.WriteLine($"*************************************************");
-            Console.WriteLine($"*       Metrics for {algorithmName}          ");
-            Console.WriteLine($"*------------------------------------------------");
-            Console.WriteLine($"*       LossFn: {metrics.LossFn:0.##}");
-            Console.WriteLine($"*       R2 Score: {metrics.RSquared:0.##}");
-            Console.WriteLine($"*       Absolute loss: {metrics.L1:#.##}");
-            Console.WriteLine($"*       Squared loss: {metrics.L2:#.##}");
-            Console.WriteLine($"*       RMS loss: {metrics.Rms:#.##}");
-            Console.WriteLine($"*************************************************");
+Common.ConsoleHelper.PrintRegressionMetrics(trainer.ToString(), metrics);
 
 ```
 >*To learn more on how to understand the metrics, check out the Machine Learning glossary from the [ML.NET Guide](https://docs.microsoft.com/en-us/dotnet/machine-learning/) or use any available materials on data science and machine learning*.
 
 If you are not satisfied with the quality of the model, there are a variety of ways to improve it, which will be covered in the *examples* category.
 
->*Keep in mind that for this sample the quality is lower than it could be because the datasets were reduced in size for performance purposes. You can use the original datasets to significantly improve the quality (Original datasets are referenced in datasets [README](../../../datasets/README.md)).*
+>*Keep in mind that for this sample the quality is lower than it could be because the datasets were reduced in size for performance purposes. You can use the original datasets to significantly improve the quality (Original datasets are referenced in datasets [README](../../../../datasets/README.md)).*
 
 ### 4. Consume model
 After the model is trained, we can use the `Predict()` API to predict the fare amount for specified trip. 
 
 ```CSharp
+//Sample: 
+//vendor_id,rate_code,passenger_count,trip_time_in_secs,trip_distance,payment_type,fare_amount
+//VTS,1,1,1140,3.75,CRD,15.5
 
-            //Prediction test
-            // Create prediction engine and make prediction.
-            var engine = model.MakePredictionFunction<TaxiTrip, TaxiTripFarePrediction>(mlcontext);
+var taxiTripSample = new TaxiTrip()
+{
+    VendorId = "VTS",
+    RateCode = "1",
+    PassengerCount = 1,
+    TripTime = 1140,
+    TripDistance = 3.75f,
+    PaymentType = "CRD",
+    FareAmount = 0 // To predict. Actual/Observed = 15.5
+};
 
-            //Sample: 
-            //vendor_id,rate_code,passenger_count,trip_time_in_secs,trip_distance,payment_type,fare_amount
-            //VTS,1,1,1140,3.75,CRD,15.5
+ITransformer trainedModel;
+using (var stream = new FileStream(ModelPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+{
+    trainedModel = mlContext.Model.Load(stream, out var modelInputSchema);
+}
 
-            var taxiTripSample = new TaxiTrip()
-            {
-                VendorId = "VTS",
-                RateCode = "1",
-                PassengerCount = 1,
-                TripTime = 1140,
-                TripDistance = 3.75f,
-                PaymentType = "CRD",
-                FareAmount = 0 // To predict. Actual/Observed = 15.5
-            };
+// Create prediction engine related to the loaded trained model
+var predEngine = mlContext.Model.CreatePredictionEngine<TaxiTrip, TaxiTripFarePrediction>(trainedModel);
 
-            var prediction = engine.Predict(taxiTripSample);
-                Console.WriteLine($"**********************************************************************");
-                Console.WriteLine($"Predicted fare: {prediction.FareAmount:0.####}, actual fare: 29.5");
-                Console.WriteLine($"**********************************************************************");
+//Score
+var resultprediction = predEngine.Predict(taxiTripSample);
+
+Console.WriteLine($"**********************************************************************");
+Console.WriteLine($"Predicted fare: {resultprediction.FareAmount:0.####}, actual fare: 15.5");
+Console.WriteLine($"**********************************************************************");
 
 ```
 

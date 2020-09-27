@@ -2,9 +2,7 @@
 
 | ML.NET version | API type          | Status                        | App Type    | Data type | Scenario            | ML Task                   | Algorithms                  |
 |----------------|-------------------|-------------------------------|-------------|-----------|---------------------|---------------------------|-----------------------------|
-| v0.7           | Dynamic API | README.md needs update | Console app | .tsv files | Sentiment Analysis | Two-class  classification | Linear Classification |
-
-**NOTE:** Readme.md is outdated, need to be updated for v0.7.
+| v1.4          | Dynamic API | up-to-date | Console app | .tsv files | Sentiment Analysis | Two-class  classification | Linear Classification |
 
 In this introductory sample, you'll see how to use [ML.NET](https://www.microsoft.com/net/learn/apps/machine-learning-and-ai/ml-dotnet) to predict a sentiment (positive or negative) for customer reviews. In the world of machine learning, this type of prediction is known as **binary classification**.
 
@@ -33,71 +31,52 @@ To solve this problem, first we will build an ML model. Then we will train the m
 
 Building a model includes: 
 
-* Define the data's schema maped to the datasets to read (`wikipedia-detox-250-line-data.tsv` and `wikipedia-detox-250-line-test.tsv`) with a DataReader
+* Define the data's schema maped to the datasets to load (`wikiDetoxAnnotated40kRows.tsv`) with a TextLoader. Split the dataset into train and test in ratio of 80:20
 
-* Create an Estimator and transform the data to numeric vectors so it can be used effectively by an ML algorithm (with `TextTransform`)
+* Create an Estimator and transform the data to numeric vectors so it can be used effectively by an ML algorithm (with `FeaturizeText`)
 
-* Choosing a trainer/learning algorithm (such as `LinearClassificationTrainer`) to train the model with. 
+* Choosing a trainer/learning algorithm (such as `SdcaLogisticRegression`) to train the model with. 
 
 The initial code is similar to the following:
 
-```CSharp
-//1. Create ML.NET context/environment
-using (var env = new LocalEnvironment())
-{
-    //2. Create DataReader with data schema mapped to file's columns
-    var reader = new TextLoader(env,
-                                new TextLoader.Arguments()
-                                {
-                                    Separator = "tab",
-                                    HasHeader = true,
-                                    Column = new[]
-                                    {
-                                        new TextLoader.Column("Label", DataKind.Bool, 0),
-                                        new TextLoader.Column("Text", DataKind.Text, 1)
-                                    }
-                                });
+```cs --source-file ./SentimentAnalysis/SentimentAnalysisConsoleApp/Program.cs --project ./SentimentAnalysis/SentimentAnalysisConsoleApp/SentimentAnalysisConsoleApp.csproj --editable false  --region step1to3
+// STEP 1: Common data loading configuration
+IDataView dataView = mlContext.Data.LoadFromTextFile<SentimentIssue>(DataPath, hasHeader: true);
 
-    //Load training data
-    IDataView trainingDataView = reader.Read(new MultiFileSource(TrainDataPath));
+TrainTestData trainTestSplit = mlContext.Data.TrainTestSplit(dataView, testFraction: 0.2);
+IDataView trainingData = trainTestSplit.TrainSet;
+IDataView testData = trainTestSplit.TestSet;
 
+// STEP 2: Common data process configuration with pipeline data transformations          
+var dataProcessPipeline = mlContext.Transforms.Text.FeaturizeText(outputColumnName: "Features", inputColumnName: nameof(SentimentIssue.Text));
 
-    //3.Create a flexible pipeline (composed by a chain of estimators) for creating/traing the model.
-
-    var pipeline = new TextTransform(env, "Text", "Features")  //Convert the text column to numeric vectors (Features column)   
-                                .Append(new LinearClassificationTrainer(env, "Features", "Label")); //(Simpler in ML.NET v0.7)
-
-}
+// STEP 3: Set the training algorithm, then create and config the modelBuilder                            
+var trainer = mlContext.BinaryClassification.Trainers.SdcaLogisticRegression(labelColumnName: "Label", featureColumnName: "Features");
+var trainingPipeline = dataProcessPipeline.Append(trainer);
 ```
 
 ### 2. Train model
 Training the model is a process of running the chosen algorithm on a training data (with known sentiment values) to tune the parameters of the model. It is implemented in the `Fit()` method from the Estimator object. 
 
-To perform training you need to call the `Fit()` method while providing the training dataset (`wikipedia-detox-250-line-data.tsv` file) in a DataView object.
+To perform training you need to call the `Fit()` method while providing the training dataset in a DataView object.
 
-```CSharp
-var model = pipeline.Fit(trainingDataView);
+```cs --source-file ./SentimentAnalysis/SentimentAnalysisConsoleApp/Program.cs --project ./SentimentAnalysis/SentimentAnalysisConsoleApp/SentimentAnalysisConsoleApp.csproj --editable false  --region step4
+// STEP 4: Train the model fitting to the DataSet
+ITransformer trainedModel = trainingPipeline.Fit(trainingData);
 ```
 
 Note that ML.NET works with data with a lazy-load approach, so in reality no data is really loaded in memory until you actually call the method .Fit().
 
 ### 3. Evaluate model
 
-We need this step to conclude how accurate our model operates on new data. To do so, the model from the previous step is run against another dataset that was not used in training (`wikipedia-detox-250-line-test.tsv`). This dataset also contains known sentiments. 
+We need this step to conclude how accurate our model operates on new data. To do so, the model from the previous step is run against another dataset that was not used in training (trainTestSplit.TestSet). This dataset also contains known sentiments. 
 
 `Evaluate()` compares the predicted values for the test dataset and produces various metrics, such as accuracy, you can explore.
 
-```CSharp
-IDataView testDataView = reader.Read(new MultiFileSource(TestDataPath));
-
-var predictions = model.Transform(testDataView);
-
-var binClassificationCtx = new BinaryClassificationContext(env);
-var metrics = binClassificationCtx.Evaluate(predictions, "Label");
-
-Console.WriteLine("Model quality metrics evaluation");
-Console.WriteLine("------------------------------------------");
-Console.WriteLine($"Accuracy: {metrics.Accuracy:P2}");
+```cs --source-file ./SentimentAnalysis/SentimentAnalysisConsoleApp/Program.cs --project ./SentimentAnalysis/SentimentAnalysisConsoleApp/SentimentAnalysisConsoleApp.csproj --editable false  --region step5
+// STEP 5: Evaluate the model and show accuracy stats
+var predictions = trainedModel.Transform(testData);
+var metrics = mlContext.BinaryClassification.Evaluate(data: predictions, labelColumnName: "Label", scoreColumnName: "Score");
 ```
 
 If you are not satisfied with the quality of the model, you can try to improve it by providing larger training datasets and by choosing different training algorithms with different hyper-parameters for each algorithm.
@@ -108,17 +87,20 @@ If you are not satisfied with the quality of the model, you can try to improve i
 
 After the model is trained, you can use the `Predict()` API to predict the sentiment for new sample text. 
 
-```CSharp
-// Create the prediction function 
-var predictionFunct = model.MakePredictionFunction<SentimentIssue, SentimentPrediction>(env);
+```cs --source-file ./SentimentAnalysis/SentimentAnalysisConsoleApp/Program.cs --project ./SentimentAnalysis/SentimentAnalysisConsoleApp/SentimentAnalysisConsoleApp.csproj --editable false  --region consume
+// Create prediction engine related to the loaded trained model
+var predEngine = mlContext.Model.CreatePredictionEngine<SentimentIssue, SentimentPrediction>(trainedModel);
 
-var resultprediction = predictionFunct.Predict(new SentimentIssue	
-                                              {	
-                                                 text = "This is a very rude movie"	
-                                              });
-
-Console.WriteLine($"Text: {sampleStatement.text} | Prediction: {(resultprediction.PredictionLabel ? "Negative" : "Positive")} sentiment");
-
+// Score
+var resultprediction = predEngine.Predict(sampleStatement);
 ```
 
-Where in `resultprediction.PredictionLabel` will be either 1 or 0 depending if it is a positive or negative predicted sentiment.
+Where in `resultprediction.PredictionLabel` will be either True or False depending if it is a Toxic or Non toxic predicted sentiment.
+
+
+## Try it on 'TRY .NET'
+
+There's a very similar sample compatible with [Try .NET](https://github.com/dotnet/try). The only difference is mostly about the multiple #regions in the code in order to support 'Try .NET'. You can get the code and try it here:
+
+https://github.com/CESARDELATORRE/MLNET-WITH-TRYDOTNET-SAMPLE/blob/master/README.md
+

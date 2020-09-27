@@ -1,4 +1,4 @@
-﻿using Microsoft.ML.Runtime.Api;
+﻿using Microsoft.ML.Data;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -8,8 +8,10 @@ namespace ImageClassification.ImageDataStructures
 {
     public class ImageNetData
     {
+        [LoadColumn(0)]
         public string ImagePath;
 
+        [LoadColumn(1)]
         public string Label;
 
         public static IEnumerable<ImageNetData> ReadFromCsv(string file, string folder)

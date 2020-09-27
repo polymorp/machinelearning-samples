@@ -2,17 +2,17 @@
 
 | ML.NET version | API type          | Status                        | App Type    | Data type | Scenario            | ML Task                   | Algorithms                  |
 |----------------|-------------------|-------------------------------|-------------|-----------|---------------------|---------------------------|-----------------------------|
-| v0.6           | Dynamic API | README.md needs update | Console app | .csv files | Customer segmentation | Clustering | K-means++ |
+| v1.4          | Dynamic API | Up-to-date | Console app | .csv files | Customer segmentation | Clustering | K-means++ |
 
 ## Problem
 
-You want to **identify groups of customers with similar profile** so you could target them afterwards (like different marketing campaings per identified customer group with similra characteristics, etc.)
+You want to **identify groups of customers with similar profile** so you could target them afterwards (like different marketing campaigns per identified customer group with similar characteristics, etc.)
 
 The problem to solve is how you can identify different groups of customers with similar profile and interest without having any pre-existing category list. You are *not* classifying customers across a category list because your customers are not *labeled* so you cannot do that. You just need to make groups/clusters of customers that the company will use afterwards for other business purposes.
 
 ## DataSet
 
-In this hipothetic case, the data to process is coming from 'The Wine Company'. That data is basically a historic of offers/deals (part of marketing campaigns) provided by the company in the past plus the historic of purchases made by customers.
+In this hypothetical case, the data to process is coming from 'The Wine Company'. That data is basically a historic of offers/deals (part of marketing campaigns) provided by the company in the past plus the historic of purchases made by customers.
 
 The training dataset is located in the `assets/inputs` folder, and split between two files. The offers file contains information about past marketing campaigns with specific offers/deals:
 
@@ -65,7 +65,7 @@ To solve this problem, first we will build an ML model. Then we will train the m
 
 #### Data Pre-Process
 
-The first thing to do is to join the data into a single view. Because we need to compare transactions made the users, we will build a pivot table, where the rows are the customers and the columns are the campaigns, and the cell value shows if the customer made related transaction during that campaign.
+The first thing to do is to join the data into a single view. Because we need to compare transactions made by the users, we will build a pivot table, where the rows are the customers and the columns are the campaigns, and the cell value shows if the customer made related transaction during that campaign.
 
 The pivot table is built executing the PreProcess function which is this case is implemented by loading the files data in memory and using Linq to join the data. But you could use any other approach depending on the size of your data, such as a relational database or any other approach:
 
@@ -110,49 +110,58 @@ The data is saved into the file `pivot.csv`, and it looks like the following tab
 
 #### Model pipeline
 
-Next, the model's pipeline is built in the method `BuildModel`.
+Here's the code which will be used to build the model:
 ```csharp
-// Reading file
- var reader = new TextLoader(env,
-    new TextLoader.Arguments
-    {
-        Column = new[] {
-            new TextLoader.Column("Features", DataKind.R4, new[] {new TextLoader.Range(0, 31) }),
-            new TextLoader.Column("LastName", DataKind.Text, 32)
-        },
-        HasHeader = true,
-        Separator = ","
-    });
+//Create the MLContext to share across components for deterministic results
+MLContext mlContext = new MLContext(seed: 1);  //Seed set to any number so you have a deterministic environment
 
- var estrimator = new PcaEstimator(env, "Features", "PCAFeatures", rank: 2, advancedSettings: (p) => p.Seed = 42)
-    .Append(new CategoricalEstimator(env, new[] { new CategoricalEstimator.ColumnInfo("LastName", "LastNameKey", CategoricalTransform.OutputKind.Ind) }))
-    .Append(new KMeansPlusPlusTrainer(env, "Features", clustersCount: kClusters));
+// STEP 1: Common data loading configuration
+var pivotDataView = mlContext.Data.LoadFromTextFile(path: pivotCsv,
+                                            columns: new[]
+                                                        {
+                                                        new TextLoader.Column("Features", DataKind.Single, new[] {new TextLoader.Range(0, 31) }),
+                                                        new TextLoader.Column(nameof(PivotData.LastName), DataKind.String, 32)
+                                                        },
+                                            hasHeader: true,
+                                            separatorChar: ',');
+
+// STEP 2: Configure data transformations in pipeline
+var dataProcessPipeline = mlContext.Transforms.ProjectToPrincipalComponents(outputColumnName: "PCAFeatures", inputColumnName: "Features", rank: 2)
+        .Append(mlContext.Transforms.Categorical.OneHotEncoding(outputColumnName: "LastNameKey", inputColumnName: nameof(PivotData.LastName), OneHotEncodingEstimator.OutputKind.Indicator));
+                
+
+// STEP 3: Create the training pipeline                
+var trainer = mlContext.Clustering.Trainers.KMeans(featureColumnName: "Features", numberOfClusters: 3);
+var trainingPipeline = dataProcessPipeline.Append(trainer);
 ```
-In this case, `TextLoader` doesn't define explicitly each column, but declares a `Features` property made by the first 30 columns of the file; also declares the property `LastName` to the value of the last column.
+
+In this case, `TextLoader` doesn't define explicitly each column, but declares a `Features` property made by the first 32 columns of the file; also declares the property `LastName` to the value of the last column.
 
 Then, you need to apply some transformations to the data:
-1) Add a PCA column, using the `PcaEstimator(env, "Features", "PCAFeatures", rank: 2, advancedSettings: (p) => p.Seed = 42)` Estimator, passing as parameter `rank: 2`, which means that we are reducing the features from 32 to 2 dimensions (*x* and *y*)
+1) Add a PCA column, using the `mlContext.Transforms.Projection.ProjectToPrincipalComponents(outputColumnName: "PCAFeatures", inputColumnName: DefaultColumnNames.Features, rank: 2)` Estimator, passing as parameter `rank: 2`, which means that we are reducing the features from 32 to 2 dimensions (*x* and *y*)
 
-2) Add a KMeansPlusPlusTrainer; main parameter to use with this learner is `clustersCount`, that specifies the number of clusters
+2) Transform LastName using `OneHotEncodingEstimator`
+
+3) Add a KMeansPlusPlusTrainer; main parameter to use with this learner is `clustersCount`, that specifies the number of clusters
 
 ### 2. Train model
 After building the pipeline, we train the customer segmentation model by fitting or using the training data with the selected algorithm:
 ```csharp
- var dataSource = reader.Read(new MultiFileSource(pivotLocation));
- var model = estrimatord.Fit(dataSource);
+ITransformer trainedModel = trainingPipeline.Fit(pivotDataView);
 ```
 ### 3. Evaluate model
-We evaluate the accuracy of the model. This accuracy is measured using the [ClusterEvaluator](#), and the [Accuracy](https://en.wikipedia.org/wiki/Confusion_matrix) and [AUC](https://loneharoon.wordpress.com/2016/08/17/area-under-the-curve-auc-a-performance-metric/) metrics are displayed.
+We evaluate the accuracy of the model. This accuracy is measured using the [ClusteringEvaluator](#), and the [Accuracy](https://en.wikipedia.org/wiki/Confusion_matrix) and [AUC](https://loneharoon.wordpress.com/2016/08/17/area-under-the-curve-auc-a-performance-metric/) metrics are displayed.
 
 ```csharp
-// Evaluate model
- var clustering = new ClusteringContext(env);
- var metrics = clustering.Evaluate(data, score: "Score", features: "Features");
+var predictions = trainedModel.Transform(pivotDataView);
+var metrics = mlContext.Clustering.Evaluate(predictions, scoreColumnName: "Score", featureColumnName: "Features");
+
 ```
 Finally, we save the model to local disk using the dynamic API:
 ```csharp
-using (var f = new FileStream(modelLocation, FileMode.Create))
-    model.SaveTo(env, f);
+ //STEP 6: Save/persist the trained model to a .ZIP file
+using (var fs = new FileStream(modelZip, FileMode.Create, FileAccess.Write, FileShare.Write))
+    mlContext.Model.Save(trainedModel, pivotDataView.Schema, fs);
 ```
 #### Model training execution
 
@@ -169,34 +178,22 @@ In this case, the model is not predicting any value (like a regression task) or 
 The code below is how you use the model to create those clusters:
 
 ```csharp
- ITransformer model;
- using (var file = File.OpenRead(modelLocation))
- {
-     model = TransformerChain
-        .LoadFrom(env, file);
- }
-            
- var reader = new TextLoader(env,
-     new TextLoader.Arguments
-     {
-         Column = new[] {
-             new TextLoader.Column("Features", DataKind.R4, new[] {new TextLoader.Range(0, 31) }),
-             new TextLoader.Column("LastName", DataKind.Text, 32)
-         },
-         HasHeader = true,
-         Separator = ","
-     });
+var data = _mlContext.Data.LoadFromTextFile(path:_pivotDataLocation,
+                            columns: new[]
+                                        {
+                                          new TextLoader.Column("Features", DataKind.Single, new[] {new TextLoader.Range(0, 31) }),
+                                          new TextLoader.Column(nameof(PivotData.LastName), DataKind.String, 32)
+                                        },
+                            hasHeader: true,
+                            separatorChar: ',');
 
- ConsoleWriteHeader("Read model");
- Console.WriteLine($"Model location: {modelLocation}");
- var data = reader.Read(new MultiFileSource(pivotDataLocation));
-
- var predictions = model.Transform(datad)
-                 .AsEnumerable<ClusteringPrediction>(env, false)
-                 .ToArray();
+//Apply data transformation to create predictions/clustering
+var tranfomedDataView = _trainedModel.Transform(data);
+var predictions = _mlContext.Data.CreateEnumerable <ClusteringPrediction>(tranfomedDataView, false)
+                            .ToArray();
 ```
 
-Additionally, the method `SaveCustomerSegmentationPlot()` saves an scatter plot drawing the samples in each assigned cluster, using the [OxyPlot](http://www.oxyplot.org/) library.
+Additionally, the method `SaveCustomerSegmentationPlotChart()` saves an scatter plot drawing the samples in each assigned cluster, using the [OxyPlot](http://www.oxyplot.org/) library.
 
 #### Run the model and identify the clusters
 
@@ -209,4 +206,3 @@ After executing the predict console app, a plot will be generated in the assets/
 ![customer segmentation](./docs/customerSegmentation.svg)
 
 In that chart you can identify 3 clusters. In this case, two of them are better differenciated (Cluster 1 in Blue and cluster 2 in Green). However, the cluster number 3 is only partially differenciated and part of the customers are overlapping the cluster number 2, which can also happen with groups of customers.
-

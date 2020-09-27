@@ -1,7 +1,4 @@
-﻿using Microsoft.ML.Core.Data;
-using Microsoft.ML.Runtime.Api;
-using Microsoft.ML.Runtime.Data;
-using OxyPlot;
+﻿using OxyPlot;
 using OxyPlot.Series;
 using System;
 using System.Collections.Generic;
@@ -12,6 +9,7 @@ using System.Linq;
 using Common;
 using CustomerSegmentation.DataStructures;
 using Microsoft.ML;
+using Microsoft.ML.Data;
 
 namespace CustomerSegmentation.Model
 {
@@ -32,34 +30,26 @@ namespace CustomerSegmentation.Model
             _mlContext = mlContext;
         }
 
-        public ITransformer LoadModelFromZipFile(string modelPath)
+        public ITransformer LoadModel(string modelPath)
         {
-            using (var stream = new FileStream(modelPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-            {
-                _trainedModel = _mlContext.Model.Load(stream);
-            }
-
+            _trainedModel = _mlContext.Model.Load(modelPath, out var modelInputSchema);
             return _trainedModel;
         }
 
         public void CreateCustomerClusters()
-        {            
-            var reader = new TextLoader(_mlContext,
-                new TextLoader.Arguments
-                {
-                    Column = new[] {
-                        new TextLoader.Column("Features", DataKind.R4, new[] {new TextLoader.Range(0, 31) }),
-                        new TextLoader.Column("LastName", DataKind.Text, 32)
-                    },
-                    HasHeader = true,
-                    Separator = ","
-                });
-
-            var data = reader.Read(new MultiFileSource(_pivotDataLocation));
-
+        {
+            var data = _mlContext.Data.LoadFromTextFile(path:_pivotDataLocation,
+                            columns: new[]
+                                        {
+                                          new TextLoader.Column("Features", DataKind.Single, new[] {new TextLoader.Range(0, 31) }),
+                                          new TextLoader.Column(nameof(PivotData.LastName), DataKind.String, 32)
+                                        },
+                            hasHeader: true,
+                            separatorChar: ',');
+            
             //Apply data transformation to create predictions/clustering
-            var predictions = _trainedModel.Transform(data)
-                            .AsEnumerable<ClusteringPrediction>(_mlContext, false)
+            var tranfomedDataView = _trainedModel.Transform(data);
+            var predictions = _mlContext.Data.CreateEnumerable <ClusteringPrediction>(tranfomedDataView, false)
                             .ToArray();
 
             //Generate data files with customer data grouped by clusters
@@ -68,7 +58,6 @@ namespace CustomerSegmentation.Model
             //Plot/paint the clusters in a chart and open it with the by-default image-tool in Windows
             SaveCustomerSegmentationPlotChart(predictions, _plotLocation);
             OpenChartInDefaultWindow(_plotLocation);
-
         }
 
         private static void SaveCustomerSegmentationCSV(IEnumerable<ClusteringPrediction> predictions, string csvlocation)

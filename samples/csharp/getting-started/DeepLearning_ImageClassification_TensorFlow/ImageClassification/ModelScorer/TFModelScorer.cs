@@ -1,12 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-
-using Microsoft.ML.Runtime.Data;
-using Microsoft.ML.Runtime.ImageAnalytics;
-using Microsoft.ML.Transforms;
 using Microsoft.ML;
-
 using ImageClassification.ImageDataStructures;
 using static ImageClassification.ModelScorer.ConsoleHelpers;
 using static ImageClassification.ModelScorer.ModelHelpers;
@@ -20,6 +15,7 @@ namespace ImageClassification.ModelScorer
         private readonly string modelLocation;
         private readonly string labelsLocation;
         private readonly MLContext mlContext;
+        private static string ImageReal = nameof(ImageReal);
 
         public TFModelScorer(string dataLocation, string imagesFolder, string modelLocation, string labelsLocation)
         {
@@ -58,7 +54,7 @@ namespace ImageClassification.ModelScorer
 
         }
 
-        private PredictionFunction<ImageNetData, ImageNetPrediction> LoadModel(string dataLocation, string imagesFolder, string modelLocation)
+        private PredictionEngine<ImageNetData, ImageNetPrediction> LoadModel(string dataLocation, string imagesFolder, string modelLocation)
         {
             ConsoleWriteHeader("Read model");
             Console.WriteLine($"Model location: {modelLocation}");
@@ -66,31 +62,28 @@ namespace ImageClassification.ModelScorer
             Console.WriteLine($"Training file: {dataLocation}");
             Console.WriteLine($"Default parameters: image size=({ImageNetSettings.imageWidth},{ImageNetSettings.imageHeight}), image mean: {ImageNetSettings.mean}");
 
-            var loader = new TextLoader(mlContext,
-                new TextLoader.Arguments
-                {
-                    Column = new[] {
-                        new TextLoader.Column("ImagePath", DataKind.Text, 0),
-                    }
-                });
+            var data = mlContext.Data.LoadFromTextFile<ImageNetData>(dataLocation, hasHeader: true);
 
-            var data = loader.Read(new MultiFileSource(dataLocation));
+            var pipeline = mlContext.Transforms.LoadImages(outputColumnName: "input", imageFolder: imagesFolder, inputColumnName: nameof(ImageNetData.ImagePath))
+                            .Append(mlContext.Transforms.ResizeImages(outputColumnName: "input", imageWidth: ImageNetSettings.imageWidth, imageHeight: ImageNetSettings.imageHeight, inputColumnName: "input"))
+                            .Append(mlContext.Transforms.ExtractPixels(outputColumnName: "input", interleavePixelColors: ImageNetSettings.channelsLast, offsetImage: ImageNetSettings.mean))
+                            .Append(mlContext.Model.LoadTensorFlowModel(modelLocation).
+                            ScoreTensorFlowModel(outputColumnNames: new[] { "softmax2" },
+                                                inputColumnNames: new[] { "input" }, addBatchDimensionInput:true));
+                        
+            ITransformer model = pipeline.Fit(data);
 
-            var pipeline = ImageEstimatorsCatalog.LoadImages(catalog: mlContext.Transforms, imageFolder: imagesFolder, columns: ("ImagePath", "ImageReal"))
-                            .Append(ImageEstimatorsCatalog.Resize(mlContext.Transforms, "ImageReal", "ImageReal", ImageNetSettings.imageHeight, ImageNetSettings.imageWidth))
-                            .Append(ImageEstimatorsCatalog.ExtractPixels(mlContext.Transforms, new[] { new ImagePixelExtractorTransform.ColumnInfo("ImageReal", "input", interleave: ImageNetSettings.channelsLast, offset: ImageNetSettings.mean) }))
-                            .Append(new TensorFlowEstimator(mlContext, modelLocation, new[] { "input" }, new[] { "softmax2" }));
+            var predictionEngine = mlContext.Model.CreatePredictionEngine<ImageNetData, ImageNetPrediction>(model);
 
-            var modeld = pipeline.Fit(data);
-
-            var predictionFunction = modeld.MakePredictionFunction<ImageNetData, ImageNetPrediction>(mlContext);
-
-            return predictionFunction;
+            return predictionEngine;
         }
 
-        protected IEnumerable<ImageNetData> PredictDataUsingModel(string testLocation, string imagesFolder, string labelsLocation, PredictionFunction<ImageNetData, ImageNetPrediction> model)
+        protected IEnumerable<ImageNetData> PredictDataUsingModel(string testLocation, 
+                                                                  string imagesFolder, 
+                                                                  string labelsLocation, 
+                                                                  PredictionEngine<ImageNetData, ImageNetPrediction> model)
         {
-            ConsoleWriteHeader("Classificate images");
+            ConsoleWriteHeader("Classify images");
             Console.WriteLine($"Images folder: {imagesFolder}");
             Console.WriteLine($"Training file: {testLocation}");
             Console.WriteLine($"Labels file: {labelsLocation}");

@@ -8,25 +8,36 @@ namespace ImageClassification.Predict
 {
     class Program
     {
-        static async Task Main(string[] args)
+        static void Main(string[] args)
         {
-            var assetsPath = ModelHelpers.GetAssetsPath(@"..\..\..\assets");
+            string assetsRelativePath = @"../../../assets";
+            string assetsPath = GetAbsolutePath(assetsRelativePath);
 
-            var tagsTsv = Path.Combine(assetsPath, "inputs", "data", "tags.tsv");
-            var imagesFolder = Path.Combine(assetsPath, "inputs", "data");
-            var imageClassifierZip = Path.Combine(assetsPath, "inputs", "imageClassifier.zip");
+            
+            var imagesFolder = Path.Combine(assetsPath, "inputs", "images-for-predictions");
+            var imageClassifierZip = Path.Combine(assetsPath, "inputs", "MLNETModel", "imageClassifier.zip");
 
             try
             {
-                var modelScorer = new ModelScorer(tagsTsv, imagesFolder, imageClassifierZip);
+                var modelScorer = new ModelScorer(imagesFolder, imageClassifierZip);
                 modelScorer.ClassifyImages();
             }
             catch (Exception ex)
             {
-                ConsoleWriteException(ex.Message);
+                ConsoleWriteException(ex.ToString());
             }
 
             ConsolePressAnyKey();
+        }
+
+        public static string GetAbsolutePath(string relativePath)
+        {
+            FileInfo _dataRoot = new FileInfo(typeof(Program).Assembly.Location);
+            string assemblyFolderPath = _dataRoot.Directory.FullName;
+
+            string fullPath = Path.Combine(assemblyFolderPath, relativePath);
+
+            return fullPath;
         }
     }
 }
